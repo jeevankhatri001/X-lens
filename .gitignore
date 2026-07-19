@@ -1,0 +1,23 @@
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.tif
+*.webp
+*.svg
+*.ico
+*.heic
+*.heif
+*.raw
+*.psd
+
+# Environment files
+*.env
+*.env.example
+
+# Folders / directories
+*X-Lens-main/
+*facerec/
