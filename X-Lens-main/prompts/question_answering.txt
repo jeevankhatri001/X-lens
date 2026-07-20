@@ -1,0 +1,1 @@
+Answer the user's question using the image. State uncertainty instead of guessing. Question: {question}

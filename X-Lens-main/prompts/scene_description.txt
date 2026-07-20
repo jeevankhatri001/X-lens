@@ -1,0 +1,7 @@
+Describe the most important visible information in one short sentence.
+
+Rules:
+- Use no more than 15 words.
+- Prioritize obstacles, people, signs, doors, stairs, vehicles, and hazards.
+- Do not describe unimportant background details.
+- Do not guess.

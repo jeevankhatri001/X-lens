@@ -1,0 +1,15 @@
+Use the context to answer the question accurately.
+
+For broad questions, combine several different facts into a short overview.
+For specific questions, answer directly.
+Do not repeat similar facts.
+Do not leave sentences unfinished.
+Do not invent information outside the context.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer in 2 to 4 complete sentences.

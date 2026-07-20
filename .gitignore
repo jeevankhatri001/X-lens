@@ -19,5 +19,4 @@
 *.env.example
 
 # Folders / directories
-*X-Lens-main/
 *facerec/

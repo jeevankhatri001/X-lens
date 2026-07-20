@@ -1,0 +1,59 @@
+[project]
+name = "x-lens"
+version = "0.1.0"
+description = "Research-oriented visual assistance API with image-quality gating, VLM and RAG"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "python-multipart>=0.0.12",
+  "pydantic-settings>=2.5",
+  "numpy>=1.26",
+  "opencv-python-headless>=4.10",
+  "Pillow>=10.4",
+  "httpx>=0.27",
+  "beautifulsoup4>=4.12",
+  "psutil>=6.0"
+]
+
+[project.optional-dependencies]
+rag = [
+  "sentence-transformers>=3.0",
+  "faiss-cpu>=1.8"
+]
+
+vlm = [
+  "torch>=2.3",
+  "transformers>=4.49",
+  "accelerate>=0.33",
+  "bitsandbytes>=0.45",
+  "qwen-vl-utils>=0.0.8"
+]
+
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.6"
+]
+[project.scripts]
+xlens = "cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["cli"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+exclude = ["tests*", "experiments*", "scripts*", "prompts*"]
