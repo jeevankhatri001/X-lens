@@ -1,3 +1,4 @@
+
 """
 EDITH Assistant v3 — Personal Secretary Edition
 ===============================================
@@ -111,6 +112,14 @@ REMINDERS_PATH = "reminders.json"
 YOLO_MODEL = "yolov8n.pt"
 FUZZY_THRESHOLD = 0.72
 
+# Your home area — used as the reference point for "how far is X" and
+# "restaurants around me". Edit these to your actual neighborhood.
+HOME_PLACE = "Bhaktapur, Nepal"
+HOME_LAT, HOME_LON = 27.6710, 85.4298
+# Restrict all map searches to this country (ISO code). "np" = Nepal.
+# Set to "" to search worldwide, or e.g. "np,in" for Nepal + India.
+COUNTRY_CODE = "np"
+
 # ----------------------------------------------------------------------
 # 1) SET QUESTIONS
 # ----------------------------------------------------------------------
@@ -212,6 +221,98 @@ def ask_qwen(prompt: str, image_bgr_frame=None) -> str:
     except requests.RequestException as e:
         print(f"[X-Lens connection error] {type(e).__name__}: {e}")
     return "Sorry, I could not reach the model right now."
+
+
+# ----------------------------------------------------------------------
+# 2b) LOCATIONS (OpenStreetMap Nominatim — free, no API key) and
+#     IMAGE FILES on disk
+# ----------------------------------------------------------------------
+import math
+
+_NOMINATIM_HEADERS = {"User-Agent": "EDITH-AR-glasses/1.0 (student project)"}
+
+
+def _nominatim_get(params, tries=2, timeout=25):
+    """One retry on timeout — Nominatim is a free service and can be slow,
+    especially over long-haul connections. Returns response JSON or the
+    string 'TIMEOUT' so callers can tell 'slow service' from 'not found'."""
+    params = dict(params)
+    if COUNTRY_CODE:
+        params["countrycodes"] = COUNTRY_CODE
+    for attempt in range(tries):
+        try:
+            r = requests.get("https://nominatim.openstreetmap.org/search",
+                             params=params, headers=_NOMINATIM_HEADERS,
+                             timeout=timeout)
+            if r.ok:
+                return r.json()
+            print(f"[Nominatim HTTP {r.status_code}] {r.text[:200]}")
+            return None
+        except requests.Timeout:
+            print(f"[Nominatim timeout, attempt {attempt + 1}/{tries}]")
+        except requests.RequestException as e:
+            print(f"[Nominatim error] {e}")
+            return None
+    return "TIMEOUT"
+
+
+def geocode(query: str):
+    """Place name -> (lat, lon, display_name), 'TIMEOUT', or None (not found).
+    Restricted to COUNTRY_CODE so 'civil hospital' finds the Nepali one."""
+    result = _nominatim_get({"q": query, "format": "json", "limit": 1})
+    if result == "TIMEOUT":
+        return "TIMEOUT"
+    if result:
+        hit = result[0]
+        return float(hit["lat"]), float(hit["lon"]), hit["display_name"]
+    return None
+
+
+def nearby_places(kind: str, n=5):
+    """e.g. kind='restaurant' near HOME_PLACE -> list of names, or 'TIMEOUT'."""
+    result = _nominatim_get({"q": f"{kind} near {HOME_PLACE}",
+                             "format": "json", "limit": n})
+    if result == "TIMEOUT":
+        return "TIMEOUT"
+    if result:
+        return [hit["display_name"].split(",")[0] for hit in result]
+    return []
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return R * 2 * math.asin(math.sqrt(a))
+
+
+IMAGE_WORDS = ("png", "jpg", "jpeg", "photo", "image", "picture", "pic")
+
+
+def find_image_file(spoken: str):
+    """Fuzzy-match a spoken filename ('o2 dot png', 'photo png') against
+    actual image files in the current directory. STT mangles filenames,
+    so we normalize and use closest-match."""
+    files = [f for f in os.listdir(".")
+             if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+    if not files:
+        return None, []
+    norm = spoken.lower().replace(" dot ", ".").replace("dot ", ".")
+    norm = re.sub(r"[^a-z0-9.]", "", norm)
+    stems = {os.path.splitext(f)[0].lower(): f for f in files}
+    for stem, f in stems.items():
+        if stem and (stem in norm or norm.replace(".png", "").replace(".jpg", "")
+                     .replace(".jpeg", "") == stem):
+            return f, files
+    close = difflib.get_close_matches(
+        norm, list(stems) + [f.lower() for f in files], n=1, cutoff=0.4)
+    if close:
+        key = close[0]
+        return stems.get(key, key if key in files else
+                         next((f for f in files if f.lower() == key), None)), files
+    return None, files
 
 
 # ----------------------------------------------------------------------
@@ -665,6 +766,101 @@ class Edith:
                 self.greeted.add(name)
                 self.voice.say(f"Hello {name}.")
 
+    # ---------- image files on disk ----------
+    def handle_image_file(self, text: str):
+        """'who is in photo.png' / 'what is o2 png' -> load the file and
+        analyze it with the same face/YOLO/X-Lens pipeline as the camera."""
+        fname, all_files = find_image_file(text)
+        if not fname:
+            if all_files:
+                self.voice.say("I couldn't match that name. Image files here are: "
+                               + ", ".join(all_files[:5]) + ".")
+            else:
+                self.voice.say("There are no image files in my folder.")
+            return
+        img = cv2.imread(fname)
+        if img is None:
+            self.voice.say(f"I found {fname} but couldn't open it.")
+            return
+        self.voice.say(f"Looking at {fname}.")
+        if "who" in text and self.people:
+            found = self.people.identify(img)
+            if found:
+                names = [n for n, _ in found]
+                known = [n for n in names if n != "UNKNOWN"]
+                if known:
+                    self.voice.say("I recognize " + ", ".join(known) + ".")
+                else:
+                    self.voice.say("There is a face, but nobody I know.")
+                return
+        kind, data = self.detect_scene(img)
+        if kind == "object" and data:
+            self.voice.say("I see " + ", ".join(data) + ".")
+            return
+        question = ("Who is in this image? Describe them briefly."
+                    if "who" in text else
+                    "Describe the main thing in this image in one short sentence.")
+        self.voice.say(ask_qwen(question, image_bgr_frame=img))
+
+    # ---------- locations ----------
+    def handle_where_is(self, place: str):
+        hit = geocode(place)
+        if hit == "TIMEOUT":
+            self.voice.say("The map service is responding slowly right now. "
+                           "Try again in a moment.")
+            return
+        if not hit:
+            self.voice.say(f"I couldn't find {place} on the map.")
+            return
+        _lat, _lon, display = hit
+        self.voice.say(f"{place} is at: {display}.")
+
+    def handle_how_far(self, text: str):
+        m = re.search(r"how far is (.+?) from (.+)", text)
+        if m:
+            a_name, b_name = m.group(1).strip(), m.group(2).strip()
+        else:
+            m = re.search(r"how far is (.+)", text)
+            if not m:
+                self.voice.say("How far is what, from where?")
+                return
+            a_name, b_name = m.group(1).strip(" ?."), None
+        a = geocode(a_name)
+        if a == "TIMEOUT":
+            self.voice.say("The map service is responding slowly right now. "
+                           "Try again in a moment.")
+            return
+        if not a:
+            self.voice.say(f"I couldn't find {a_name} on the map.")
+            return
+        if b_name:
+            b = geocode(b_name)
+            if b == "TIMEOUT":
+                self.voice.say("The map service is responding slowly right now. "
+                               "Try again in a moment.")
+                return
+            if not b:
+                self.voice.say(f"I couldn't find {b_name} on the map.")
+                return
+            km = haversine_km(a[0], a[1], b[0], b[1])
+            self.voice.say(f"{a_name} is about {km:.1f} kilometers from {b_name}, "
+                           "in a straight line.")
+        else:
+            km = haversine_km(a[0], a[1], HOME_LAT, HOME_LON)
+            self.voice.say(f"{a_name} is about {km:.1f} kilometers from you, "
+                           "in a straight line.")
+
+    def handle_nearby(self, kind: str):
+        names = nearby_places(kind, n=5)
+        if names == "TIMEOUT":
+            self.voice.say("The map service is responding slowly right now. "
+                           "Try again in a moment.")
+            return
+        if not names:
+            self.voice.say(f"I couldn't find any {kind}s near {HOME_PLACE}.")
+            return
+        self.voice.say(f"Near you I found: " + ", ".join(names) + ".")
+
     # ---------- timers ----------
     def start_timer(self, seconds: int):
         def _spoken_countdown():
@@ -756,6 +952,29 @@ class Edith:
         for it in items:
             self.voice.say(f"On {it['due']}: {it['text']}.")
 
+    def handle_clear_reminders(self):
+        if not self.reminders.items:
+            self.voice.say("You have no reminders to clear.")
+            return
+        self.voice.say(f"Delete all {len(self.reminders.items)} reminders? Say yes or no.")
+        if "yes" in self.voice.listen(timeout=6):
+            self.reminders.items = []
+            self.reminders.save()
+            self.voice.say("All reminders deleted.")
+        else:
+            self.voice.say("Okay, keeping them.")
+
+    def handle_clear_notes(self):
+        if not os.path.exists(NOTES_PATH) or not self.notes.recent(1):
+            self.voice.say("You have no notes to clear.")
+            return
+        self.voice.say("Delete all your notes? Say yes or no.")
+        if "yes" in self.voice.listen(timeout=6):
+            open(NOTES_PATH, "w").close()
+            self.voice.say("All notes deleted.")
+        else:
+            self.voice.say("Okay, keeping them.")
+
     def reminder_watcher(self):
         """Background thread: announces reminders when their day arrives."""
         while True:
@@ -813,8 +1032,32 @@ class Edith:
             self.voice.say("Shutting down. Goodbye Jeevan.")
             return False
 
+        # -- image files on disk (checked early: "who is o2 png" must not be
+        #    stolen by the profile lookup or Qwen). Word-boundary match so
+        #    words like "topic" or "epic" don't falsely trigger on "pic".
+        if re.search(r"\b(png|jpg|jpeg|photo|image|picture|pic)\b", text):
+            self.handle_image_file(text)
+            return True
+
+        # -- locations (Qwen has no map data; OpenStreetMap does) --
+        if "how far" in text:
+            self.handle_how_far(text)
+            return True
+        m = re.search(r"(?:where is|location of|precise location of)\s+(.+)", text)
+        if m:
+            self.handle_where_is(m.group(1).strip(" ?."))
+            return True
+        m = re.search(r"(?:how many|find|any)?\s*(restaurant|cafe|hospital|pharmacy|"
+                      r"bank|atm|hotel|school|temple|gym)s?\s+(?:are\s+)?"
+                      r"(?:around|near)\s+(?:me|here|us)", text)
+        if m:
+            self.handle_nearby(m.group(1))
+            return True
+
         # -- profiles / people --
-        if self.people and "forget" in text:
+        if self.people and "forget" in text \
+                and "note" not in text and "node" not in text \
+                and "reminder" not in text:
             spoken = text.split("forget", 1)[1].strip()
             name = self.people.find_name(spoken) if spoken else None
             if name:
@@ -855,8 +1098,16 @@ class Edith:
                 return True
 
         # -- notes --
-        if any(k in text for k in ("take a note", "take note", "note down",
-                                   "note it down", "make a note", "note that")):
+        if any(k in text for k in ("clear my notes", "delete my notes",
+                                   "delete all notes", "forget my notes",
+                                   "forget the notes", "forget all the notes",
+                                   "forget all the nodes", "forget the nodes",
+                                   "delete my nodes")):
+            self.handle_clear_notes()
+            return True
+        if any(k in text for k in ("take a note", "take notes", "take note",
+                                   "note down", "note it down", "make a note",
+                                   "note that")):
             self.handle_take_note(text)
             return True
         if "read my notes" in text or "my notes" in text:
@@ -864,6 +1115,11 @@ class Edith:
             return True
 
         # -- reminders --
+        if any(k in text for k in ("clear my reminders", "delete my reminders",
+                                   "delete all reminders", "forget my reminders",
+                                   "delete the reminder", "delete reminder")):
+            self.handle_clear_reminders()
+            return True
         if "remind" in text and "reminder" not in text:
             self.handle_reminder(text)
             return True
@@ -895,7 +1151,10 @@ class Edith:
             return True
         if any(k in text for k in ("what is this", "what is that",
                                    "what am i looking at", "identify the object",
-                                   "identify this", "open camera")):
+                                   "identify this", "open camera",
+                                   "what do you see", "can you see",
+                                   "what can you see", "look at this",
+                                   "describe what you see")):
             self.handle_what_is_this()
             return True
 
